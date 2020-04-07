@@ -16,7 +16,7 @@ In other words this solves the [word problem](https://en.wikipedia.org/wiki/Word
 
 Besides knowing wether 2 arbitrary sequences are equivalent I also want to be able to know (in an automated way) which one is "more" than the other.  (This comes with the assumption that all symbols are positive, unable to negate eachother.)
 
-> > If i could rewrite strings a and b in such a way that a is a substring of (or equal to) b then I know that b is "more" than (or equal to) a.
+> If we could rewrite strings a and b in such a way that a is a substring of (or equal to) b then we know that b is "more" than (or equal to) a.
      
 To get to a situation whereby one string becomes a substring of the other it helps a lot to minimise the amount of symbols used.
 By tweaking the complexity ordering it is sometimes possible to rewrite arbitrary sequences in such a way that they use only 1 or 2 symbols, greatly improving the probability that one will be a substring of the other.
@@ -54,7 +54,7 @@ Turns out "493" is more than "33331".
 Download, compile, test
 -----------
 
-```
+```shell
 $ git clone https://github.com/FDePourcq/templated_knuth_bendix.git
 Cloning into 'templated_knuth_bendix'...
 remote: Enumerating objects: 12, done.
