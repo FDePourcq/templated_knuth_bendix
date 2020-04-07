@@ -1,0 +1,6 @@
+[submodule "generic_aho_corasick"]
+	path = generic_aho_corasick
+	url = https://github.com/FDePourcq/generic_aho_corasick.git
+[submodule "murmur3"]
+	path = murmur3
+	url = https://github.com/PeterScott/murmur3.git
