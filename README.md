@@ -8,13 +8,13 @@ It works with simple plain sequences of symbols and equalities between them.
 - It doesn't know about any operators like inverse.
 
 But it understands that equalities of strings can be used to rewrite strings.
-In combination with a user-provided complexity ordering (like [shortlex](https://en.wikipedia.org/wiki/Shortlex_order)) it can ( but it is not guaranteed ) build a rewrite-system ( a set of rewrite-rules...) that is [confluent](https://en.wikipedia.org/wiki/Confluence_(abstract_rewriting)). (ie when rewriting a string with those rules you will end up with the same end-result irrespective of how you applied those rules).
+In combination with a user-provided complexity ordering (like [shortlex](https://en.wikipedia.org/wiki/Shortlex_order)) it can ( but that is not guaranteed ) build a rewrite-system ( a set of rewrite-rules...) that is [confluent](https://en.wikipedia.org/wiki/Confluence_(abstract_rewriting)). (ie when rewriting a string with those rules you will end up with the same end-result irrespective of how you applied those rules).
 
 Having a confluent rewrite system is very useful because you can use it to know when 2 strings are equivalent.
 In other words this solves the [word problem](https://en.wikipedia.org/wiki/Word_problem_(mathematics)).
 
 
-Besides knowing wether 2 arbitrary sequences are equivalent I also want to be able to know (in an automated way) which one is "more" than the other.  (This comes with the assumption that all symbols are positive, unable to negate eachother.)
+Besides knowing whether 2 arbitrary sequences are equivalent wanted to know (in an automated way) which one is "more" than the other.  (This comes with the assumption that all symbols are positive, unable to negate eachother.)
 
 > If we could rewrite strings a and b in such a way that a is a substring of (or equal to) b then we know that b is "more" than (or equal to) a.
      
