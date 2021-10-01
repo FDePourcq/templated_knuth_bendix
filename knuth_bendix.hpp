@@ -7,7 +7,31 @@
 #include "aho_corasick.hpp" // fast multi-string pattern search
 #include "murmur3.h"
 #include <memory>
+#include <set>
 
+struct RuntimeLimiter;
+
+//#define debugline(x) std::cerr << x << std::endl;
+#ifndef debugline
+#define debugline(x) ;
+
+#endif
+
+template<typename iteratortype>
+std::string toString(const iteratortype &b, const iteratortype &e) noexcept {
+    std::ostringstream oss;
+    for (auto i = b; i != e; ++i) {
+        oss << *i << " ";
+    }
+    return oss.str();
+}
+
+template<typename containertype>
+std::string toString(const containertype &c) noexcept {
+    return toString(c.begin(), c.end());
+}
+
+/*
 // This implementation of lower_bound doesnt require a reference to the value.
 // But it breaks the convention that a comparator accepts 2 params.
 template<typename _ForwardIterator, typename _Compare>
@@ -43,25 +67,28 @@ typename vector_type::const_iterator insertOrderedUnique(vector_type &v,
     }
     return it;
 }
-
-template<typename symbolinfo, typename indextype>
+*/
+template<typename stringtype, typename indextype>
 struct StringStorage {
-    typedef typename symbolinfo::symboltype symboltype;
-    typedef typename symbolinfo::stringtype stringtype;
-    std::deque <stringtype> strings; // all strings get stored here.
-    std::deque <indextype> ordered_stringindexes; // ordered by their associated string. this is the lookup-map for strings.
-
+    typedef typename stringtype::value_type symboltype;
+    //   typedef typename symbolinfo::stringtype stringtype;
+    std::deque<stringtype> strings; // all strings get stored here.
+    std::deque<indextype> ordered_stringindexes; // ordered by their associated string. this is the lookup-map for strings.
+public:
     std::function<bool(const symboltype &, const symboltype &)> comp = [](const symboltype &a, const symboltype &b) { return a < b; };
     std::function<bool(const symboltype &, const symboltype &)> eq = [](const symboltype &a, const symboltype &b) { return a == b; };
 
     template<typename iteratortype>
-    indextype getOrCreateString(const iteratortype &begin, const iteratortype &end) {
+    indextype getOrCreateString(const iteratortype &begin, const iteratortype &end) noexcept {
+
+
         // check ordered_stringindexes if it exists already, if not store it in strings and put the index in ordered_stringindexes. return the index.
         indextype ret = *insertOrderedUnique(ordered_stringindexes,
                                              [&]() { // constructor
-                                                 indextype ret = strings.size();
-                                                 strings.emplace_back(begin, end);
-                                                 return ret;
+                                                 indextype ret_ = strings.size();
+                                                 strings.push_back(stringtype(begin, end));
+//                                                 assert(std::equal(begin, end, strings[ret_].begin(), strings[ret_].end(), eq));
+                                                 return ret_;
                                              },
                                              [&](const indextype &index) -> bool {
                                                  const auto &o = strings[index];
@@ -73,44 +100,55 @@ struct StringStorage {
                                                  return std::lexicographical_compare(o.begin(), o.end(), begin, end, comp);
                                              });
 
-        //std::cerr << "string index " << ret << " is " << toString(begin,end) << std::endl;
+        debugline("string index " << ret << " is " << toString(begin, end));
         return ret;
     }
 
     template<typename stringtype2>
-    indextype getOrCreateString(const stringtype2 &s) {
+    indextype getOrCreateString(const stringtype2 &s) noexcept {
         return getOrCreateString(s.begin(), s.end());
+    }
+
+    const stringtype &get(const indextype i) const noexcept {
+        return strings[i];
     }
 };
 
-template<typename symbolinfo, typename stringid>
+template<typename stringtype, typename stringid>
 struct KnuthBendixCompletion {
-    typedef typename symbolinfo::symboltype symboltype;
-    typedef typename symbolinfo::stringtype stringtype;
-    typedef StringStorage<symbolinfo, stringid> stringstoragetype;
-    stringstoragetype *ss;
+    typedef typename stringtype::value_type symboltype;
+    typedef StringStorage<stringtype, stringid> stringstoragetype;
+    stringstoragetype *ss; // the stringstorage is not owned by this.
 
-    typedef std::pair <stringid, stringid> equality; // == identity
-    typedef std::pair <stringid, stringid> rule;
-    typedef std::set <equality> identities;
-    typedef std::set <rule> rules;
+    std::vector<stringid> eqclasses; // linked lists, circular, easily merged, easily iterated.
 
-    identities input_identities; // the inputs are stored to allow reprocessing them.
-    identities current_identities; // these will be converted into rules eventually
-    rules current_rules; // these are going to be rewritten till they converge ... if they converge at all ...
-    aho_corasick::basic_trie<stringtype, rules> actree; // given a inputstring this will efficiently give all the rules that got triggered (and where...).
+    std::deque<std::function<bool(const stringtype &, const stringtype &, RuntimeLimiter* )> > complexity_orderings;
+    std::deque<std::vector<bool> > is_elite; // for each complexity ordering
 
-    KnuthBendixCompletion(stringstoragetype *ss_) :
-            ss(ss_) {
+
+    std::set<std::pair<stringid, stringid> > checked_for_expansion;
+    std::set<std::pair<stringid, stringid> > checked_for_deducing;
+
+    aho_corasick::basic_trie<symboltype, std::vector<stringid> > actree;// given a inputstring this will efficiently give all the matched strings
+    //aho_corasick::basic_trie<symboltype, int > minimum_costs; // infinite cases ... to be avoided ...
+
+    std::deque<std::vector<bool>> makes_sense_for_given_order; // in many cases we might detect a match but should do nothing with it, it would only be redundant
+    std::size_t max_allowed_string_size = std::numeric_limits<std::size_t>::max();
+    bool clean;
+
+    KnuthBendixCompletion(stringstoragetype *ss_) noexcept:
+            ss(ss_),
+            clean(false) {
+        // shortlex is of interest anyway. At least one decent order is needed for deducing.
+        addOrdering([&](const stringtype &a, const stringtype &b, RuntimeLimiter* ) {
+            // shortlex ordering.
+            if (a.size() < b.size())
+                return true;
+            if (a.size() > b.size())
+                return false;
+            return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end(), ss->comp);
+        });
     }
-
-    std::function<bool(const stringtype &, const stringtype &)> complexity_comparison = [&](const stringtype &a, const stringtype &b) {
-        if (a.size() < b.size())
-            return true;
-        if (a.size() > b.size())
-            return false;
-        return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end(), ss->comp);
-    };
 
     struct Bits128 {
         uint64_t a, b;
@@ -125,433 +163,452 @@ struct KnuthBendixCompletion {
         }
     };
 
-    std::set <Bits128> hashed_states; // anti-loop detection
+    std::size_t addOrdering(const std::function<bool(const stringtype &, const stringtype &, RuntimeLimiter* )> &order) noexcept {
+
+        // TODO: ... all those
+        complexity_orderings.push_back(order);
+        std::vector<bool> &e = is_elite.emplace_back(eqclasses.size(), true);
+        std::size_t orderindex = is_elite.size() - 1;
+        makes_sense_for_given_order.emplace_back(eqclasses.size(), true);
+
+        // filter out the elite.
+        iterateEqClasses([&](const stringid representativeid) {
+            assert(e[representativeid]); // this must be because we just initialised it that way and this is supposed to be an untouched eqclass
+            iterateEqClassElite(representativeid, [&](const stringid s1) {
+                iterateEqClassElite(representativeid, [&](const stringid s2) {
+                    if (s1 != s2 && complexity_orderings[orderindex](ss->get(s1), ss->get(s2),0)) {
+                        is_elite[orderindex][s2] = false;
+                        std::cerr << '^';
+                    }
+                    return true;
+                }, orderindex);
+                return true;
+            }, orderindex);
+            return true;
+        });
+        clean = false;
+        return orderindex;
+    }
 
     template<typename iteratortype>
-    stringid getOrCreateString(const iteratortype &begin, const iteratortype &end) {
-        return ss->getOrCreateString(begin, end);
+    stringid getOrCreateString(const iteratortype &begin, const iteratortype &end) noexcept {
+        auto ret = ss->getOrCreateString(begin, end);
+        if (eqclasses.size() <= ret) {
+            if (begin != end) {
+                actree.getOrCreate(begin, end).push_back(ret);
+            }
+            while (eqclasses.size() <= ret) {
+                eqclasses.push_back(eqclasses.size());
+            }
+
+
+            for (auto &ie : is_elite) {
+                while (ie.size() < eqclasses.size()) {
+                    ie.push_back(true);
+                }
+            }
+            for (auto &ie : makes_sense_for_given_order) {
+                while (ie.size() < eqclasses.size()) {
+                    ie.push_back(true);
+                }
+            }
+        }
+        return ret;
     }
 
     template<typename stringtype2>
-    stringid getOrCreateString(const stringtype2 &s) {
-        return ss->getOrCreateString(s.begin(), s.end());
+    stringid getOrCreateString(const stringtype2 &s) noexcept {
+        return getOrCreateString(s.begin(), s.end());
     }
 
-    equality orderIdentity(const equality &eq) {
-        if (complexity_comparison(ss->strings[eq.first], ss->strings[eq.second])) {
-            return equality(eq.second, eq.first);
-        }
-        return eq;
-    }
+    // overriding this (using eg partial specialisation) can be very handy.
 
-    void addIdentity(const stringtype &a, const stringtype &b) {
-        const auto identity = orderIdentity(std::make_pair(getOrCreateString(a), getOrCreateString(b)));
-        input_identities.insert(identity);
-    }
 
-    void tryDelete() {
-        for (auto i = current_identities.begin(); i != current_identities.end();) {
-            const auto &s1 = ss->strings[i->first];
-            const auto &s2 = ss->strings[i->second];
-            if (std::equal(s1.begin(), s1.end(), s2.begin(), ss->eq)) {
-                i = current_identities.erase(i);
-            } else {
-                ++i;
-            }
+    void addIdentity(const stringtype &a, const stringtype &b, RuntimeLimiter *runtimelimiter) noexcept {
+        if (addIdentity(getOrCreateString(a), getOrCreateString(b), runtimelimiter)) {
+            clean = false;
         }
     }
 
-    template<typename iteratortype, typename callbacktype>
-    void reduce(const iteratortype &begin, const iteratortype &end, const callbacktype &fct) {
-        std::list <symboltype> ret(begin, end);
-        bool changed = false;
-        bool changed_local = false;
-        //std::cerr << "[";
-        // i must ... introduce loopdetection ...
-        do {
-
-            changed_local = false;
-            actree.iterate_matches(ret.begin(),
-                                   ret.end(),
-                                   [&](const rules &r,
-                                       const typename std::list<symboltype>::iterator &posbegin,
-                                       const typename std::list<symboltype>::iterator &posend) {
-                                       if (r.empty()) {
-                                           return true;
+// this function separated from expand() to allow specializing it further.
+    bool expand_getAllRewrites(const stringid i,RuntimeLimiter* runtimelimiter) noexcept {
+        bool changed_something = false;
+        std::set<std::pair<stringid, stringid> > checked_extra;
+        const auto &s = ss->get(i);
+        actree.iterate_matches(s.begin(),
+                               s.end(),
+                               [&](const std::vector<stringid> &matches,
+                                   const typename stringtype::iterator &posbegin,
+                                   const typename stringtype::iterator &posend) {
+                                   if (s.begin() == posbegin && s.end() == posend) {
+                                       return true; // the entire thing matched, doing replacements here would give no new info.
+                                   }
+                                   for (const stringid match : matches) {
+                                       if (!makes_sense_for_given_order[0][match] || eqclasses[match] == match || checked_for_expansion.find({i, match}) != checked_for_expansion.end()) {
+                                           continue;
                                        }
-                                       const auto &replacement = ss->strings[r.begin()->second];
-                                       //std::cerr << " from string " << std::string(ret.begin(), ret.end()) << " , particularly " << std::string(posbegin,posend) << "  can be replaced by " << std::string(replacement.begin(), replacement.end())  << std::endl;
-
-                                       //std::cerr << " match is " << toString(posbegin,posend) <<std::endl;
-                                       //std::cerr << "applying rule " << toString(strings[r.begin()->first]) << " --> " << toString(strings[r.begin()->second]) << " : " << toString(ret);
-                                       const auto begin2 = ret.erase(posbegin, posend);
-                                       ret.insert(begin2, replacement.begin(), replacement.end());
-                                       //std::cerr << " ==> " << toString(ret) << std::endl;
-
-                                       changed_local = true;
-                                       changed = true;
-                                       return false;
-                                   });
-
-        } while (changed_local);
-        //std::cerr << "]";
-        fct(changed, ret.begin(), ret.end());
-    }
-
-    template<typename stringtype, typename callbacktype>
-    void reduce(const stringtype &s, const callbacktype &fct) {
-        reduce(s.begin(), s.end(), fct);
+                                       checked_extra.insert({i, match});
+                                       iterateEqClass/*Elite*/(match, [&](const stringid replacementid) {
+                                           if (match == replacementid) {
+                                               return;
+                                           }
+                                           stringtype s2(s.begin(), posbegin);
+                                           const stringtype &replacement = ss->get(replacementid);
+                                           s2.insert(s2.end(), replacement.begin(), replacement.end());
+                                           s2.insert(s2.end(), posend, s.end());
+                                           if (addIdentity(i, getOrCreateString(s2))) {
+                                               changed_something = true;
+                                           }
+                                       });
+                                   }
+                                   return true; // keep iterating... i want them all...
+                               });
+        checked_for_expansion.insert(checked_extra.begin(), checked_extra.end());
+        return changed_something;
     }
 
 
-    // what about using std::optional as returntype?
-    template<typename iteratortype>
-    std::pair<std::list<symboltype>, bool> reduceCopy(const iteratortype &begin, const iteratortype &end) {
-        std::pair<std::list<symboltype>, bool> ret(std::list<symboltype>(begin, end), false);
-        bool changed_local = false;
-        do {
-            changed_local = false;
-            actree.iterate_matches(ret.first.begin(),
-                                   ret.first.end(),
-                                   [&](const rules &r,
-                                       const typename std::list<symboltype>::iterator &posbegin,
-                                       const typename std::list<symboltype>::iterator &posend) {
-                                       if (r.empty()) {
-                                           return true;
-                                       }
-                                       const auto &replacement = ss->strings[r.begin()->second];
-                                       //std::cerr << " match is " << toString(posbegin,posend) <<std::endl;
-                                       //std::cerr << "applying rule " << toString(strings[r.begin()->first]) << " --> " << toString(strings[r.begin()->second]) << " : " << toString(ret);
-                                       const auto begin2 = ret.first.erase(posbegin, posend);
-                                       ret.first.insert(begin2, replacement.begin(), replacement.end());
-                                       //std::cerr << " ==> " << toString(ret) << std::endl;
+    void expand(RuntimeLimiter* runtimelimiter) noexcept {
+        if (clean) {
+            return;
+        }
+        std::cerr << "EXPAND";
 
-                                       changed_local = true;
-                                       ret.second = true;
-                                       return false;
-                                   });
-        } while (changed_local);
-        return ret;
-    }
-
-    std::pair<std::list<symboltype>, bool> reduceCopy(const stringtype &s) {
-        return reduceCopy(s.begin(), s.end());
-    }
-
-
-    template<typename iteratortype>
-    stringid reduceCopyRegister(const iteratortype &begin, const iteratortype &end) {
-        stringid ret;
-        reduce(begin,
-               end,
-               [&](const bool,//changed,
-                   const typename std::list<symboltype>::iterator &begin,
-                   const typename std::list<symboltype>::iterator &end) {
-                   ret = getOrCreateString(begin, end);
-               });
-        return ret;
-    };
-
-    template<typename stringtype>
-    stringid reduceCopyRegister(const stringtype &s) {
-        return reduceCopyRegister(s.begin(), s.end());
-    }
-
-    void tryCompose() {
-        // this only modifies rules, but the actree needs to be updated in tandem.
-        for (auto i = current_rules.begin(); i != current_rules.end();) {
-            const auto &s1 = ss->strings[i->first];
-            const auto &s2 = ss->strings[i->second];
-            auto mmm = reduceCopy(s2.begin(), s2.end());
-            if (mmm.second) {
-                //std::cerr << "tryCompose: rewriting " << toString(s2) << " to " << toString(mmm.first) << std::endl;
-                //assert(sum(s2) == sum(mmm.first));
-                //assertss(sum(s2) == sum(mmm.first), pt(sum(s2)) << pt(sum(mmm.first)) );
-                auto *actreenode = actree.getNodeOrCreate(s1);
-                assert(actreenode->payload.get());
-                actreenode->payload->erase(*i);
-                rule new_rule = std::make_pair(i->first, getOrCreateString(mmm.first.begin(), mmm.first.end()));
-                assert(new_rule.second != i->second); // we are supposed to have changed something remember...
-                i = current_rules.erase(i);
-                current_rules.insert(new_rule);
-                actreenode->payload->insert(new_rule);
-            } else {
-                ++i;
+        bool changed_something = false;
+        for (stringid i = 0; i < eqclasses.size(); i++) {
+            if (eqclasses[i] == i) {
+                continue;
+            }
+            if (expand_getAllRewrites(i,runtimelimiter)) {
+                changed_something = true;
             }
         }
-    }
 
-    void trySimplify() {
-        for (auto i = current_identities.begin(); i != current_identities.end();) {
-            const auto &s1 = ss->strings[i->first];
-            const auto &s2 = ss->strings[i->second];
-            //auto s1reduced = reduceCopy(s1.begin(),s1.end());
-            auto s1reduced = std::make_pair(s1, false);
-            auto s2reduced = reduceCopy(s2.begin(), s2.end());
-            if (s1reduced.second || s2reduced.second) {
-                auto new_identity = *i;
-                if (s1reduced.second) {
-                    //std::cerr << "trySimplify: rewriting " << toString(s1) << " to " << toString(s1reduced.first) << std::endl;
-                    //assertss(sum(s1) == sum(s1reduced.first), pt(sum(s1)) << pt(sum(s1reduced.first)) );
-                    new_identity.first = getOrCreateString(s1reduced.first);
-                }
-                if (s2reduced.second) {
-                    //std::cerr << "trySimplify: rewriting " << toString(s2) << " to " << toString(s2reduced.first) << std::endl;
-                    //assertss(sum(s2) == sum(s2reduced.first), pt(sum(s2)) << pt(sum(s2reduced.first)) );
-                    new_identity.second = getOrCreateString(s2reduced.first);
-                }
-                assert(new_identity != *i); // we are supposed to have changed something remember...
-                i = current_identities.erase(i);
-                if (new_identity.first != new_identity.second) {
-                    current_identities.insert(orderIdentity(new_identity));
-                }
-            } else {
-                ++i;
+        // try to discover new identities through knuth-bendix deduce
+        for (stringid i = 0; i < eqclasses.size(); i++) {
+            if (eqclasses[i] == i) {
+                continue;
             }
-        }
-    }
+            const stringtype large = ss->get(i);
+            const int s1size = large.size();
 
-    void tryOrient() {
-        for (auto i = current_identities.begin(); i != current_identities.end();) {
-            const auto &s1 = ss->strings[i->first];
-            const auto &s2 = ss->strings[i->second];
-            if (complexity_comparison(s1, s2)) {
-                //std::cerr << "tryOrient(1): adding rule " << toString(s2) << " --> " << toString(s1) <<  pt(s2.size()) << " " << pt(s1.size())  << std::endl;
-                auto new_rule = std::make_pair(i->second, i->first);
-                current_rules.insert(new_rule);
-                actree.getOrCreate(s2.begin(), s2.end()).insert(new_rule);
-                i = current_identities.erase(i);
-            } else if (complexity_comparison(s2, s1)) {
-                //std::cerr << "tryOrient(2): adding rule " << toString(s1) << " --> " << toString(s2) << std::endl;
-                auto new_rule = std::make_pair(i->first, i->second);
-                current_rules.insert(new_rule);
-                actree.getOrCreate(s1.begin(), s1.end()).insert(new_rule);
-                i = current_identities.erase(i);
-            } else {
-                ++i;
-            }
-        }
-    }
-
-    // bool orderingOnRules(const rule& st, const rule& lr) {
-    //   return /*complexity_comparison(strings[lr.first] , strings[st.first]) ||*/ ( lr.first == st.first &&   complexity_comparison(strings[lr.second] , strings[st.second]) );
-    // }
-
-    // void tryCollapse(){ // "effondrement" in french.
-    //   assert(false); // could not figure out the correct ordering on rules as described in the wiki-page.
-    //   for (auto i = current_rules.begin(); i != current_rules.end();) {
-    //     bool changed = false;
-    //     actree.iterate_matches(strings[i->first].begin(),
-    // 			     strings[i->first].end(),
-    // 			       [&](rules & rs,
-    // 				   const typename stringtype::iterator& posbegin,
-    // 				   const typename stringtype::iterator& posend){
-
-
-    // 				 for (const auto &r : rs) {
-    // 				   if (orderingOnRules( *i, r )) { // this is not good. how do i know when s > l ...
-    // 				     stringtype mmm(strings[i->first].begin(), posbegin);
-    // 				     mmm.insert(mmm.end(),strings[r.second].begin(),strings[r.second].end() );
-    // 				     mmm.insert(mmm.end(),posend,strings[i->first].end() );
-    // 				     current_identities.insert(orderIdentity(std::make_pair( getOrCreateString(mmm), i->second)));
-    // 				     //std::cerr << "tryCollapse: changed ts " << toString(strings[i->first]) << " --> " << toString(strings[i->second]) << " into " <<  toString(mmm) << " --> " << toString(strings[i->second])  <<  " using lr " << toString(strings[r.first]) << " --> " << toString(strings[r.second]) << std::endl;
-    // 				     rs.erase(r);
-    // 				     changed = true;
-    // 				     return false;
-
-
-    // 				   }
-    // 				 }
-    // 				 return true;
-    // 			       });
-    //     if (changed) {
-    // 	i = current_rules.erase(i);
-    //     }else{
-    // 	++i;
-    //     }
-    //   }
-    // }
-
-    // void tryObsolete(){ // could not understand tryCollapse, implemented this instead: remove rules that are obviously redundant
-    //   for (auto i = current_rules.begin(); i != current_rules.end();) {
-    //     // temporarily remove this rule from the actree, the effect should be that it will not be used for reductions...
-    //     auto* ptr = actree.getNoCreate(strings[i->first]);
-    //     assert(ptr);
-    //     assert(ptr->find(*i) != ptr->end() );
-    //     ptr->erase(*i);
-
-    //     reduce(strings[i->first],
-    // 	     [&](bool changed,
-    // 		 const typename std::list<symboltype>::iterator& begin,
-    // 		 const typename std::list<symboltype>::iterator& end){
-    // 	       if (changed && std::equal(begin,end, strings[i->second].begin(), strings[i->second].end(), eq )){
-    // 		 // we can consider rule i to be obsolete!
-    // 		 //std::cerr << "OBSOLETE RULE: " << toString(strings[i->first]) << " --> " << toString(strings[i->second]) << std::endl;
-    // 		 i = current_rules.erase(i);
-    // 	       }else{
-    // 		 // not obsolete yet,
-    // 		 ptr->insert(*i);
-    // 		 ++i;
-    // 	       }
-    // 	     });
-    //   }
-    // }
-
-    void tryCollapseAttempt2() {
-        for (auto i = current_rules.begin(); i != current_rules.end();) {
-
-            // temporarily remove this rule from the actree, the effect should be that it will not be used for reductions...
-            auto *ptr = actree.getNoCreate(ss->strings[i->first]);
-            assert(ptr);
-            assert(ptr->find(*i) != ptr->end());
-            ptr->erase(*i);
-
-            reduce(ss->strings[i->first],
-                   [&](const bool changed,
-                       const typename std::list<symboltype>::iterator &begin,
-                       const typename std::list<symboltype>::iterator &end) {
-                       if (changed && std::equal(begin, end, ss->strings[i->second].begin(), ss->strings[i->second].end(), ss->eq)) {
-                           //std::cerr << "collapsing rule: " << toString(strings[i->first]) << " --> " << toString(strings[i->second]) << std::endl;
-                           //std::cerr << "collapsed rule became identity: " << toString(reducedstuff.first) << " == " << toString(strings[i->second]) << std::endl;
-                           equality new_identity(getOrCreateString(begin, end), i->second);
-                           if (new_identity.first != new_identity.second) {
-                               new_identity = orderIdentity(new_identity);
-                               if (current_identities.find(new_identity) == current_identities.end()) {
-                                   //std::cerr << "collapsed rule became identity: " << toString(strings[new_identity.first]) << " == " << toString(strings[new_identity.second]) << std::endl;
-                                   current_identities.insert(new_identity);
-                               }
-                           }
-                           i = current_rules.erase(i);
-                       } else {
-                           // not obsolete yet,
-                           ptr->insert(*i);
-                           ++i;
-                       }
-                   });
-
-
-        }
-    }
-
-    void tryDeduce() {
-        for (auto i = current_rules.begin(); i != current_rules.end(); ++i) {
-            auto j = i;
-            ++j;
-            for (; j != current_rules.end(); ++j) {
-                rule large = *i;
-                rule small = *j;
-                if (ss->strings[large.first].size() < ss->strings[small.first].size()) { // this is not about complexity, it is about length
-                    std::swap(large, small);
+            for (stringid j = 0; j < eqclasses.size(); j++) {
+                if (eqclasses[j] == j) {
+                    continue;
                 }
-
-                int s1size = ss->strings[large.first].size();
-                int s2size = ss->strings[small.first].size();
+                if (checked_for_deducing.find(std::make_pair(i, j)) != checked_for_deducing.end()) {
+                    continue;
+                }
+                checked_for_deducing.insert(std::make_pair(i, j));
+                const stringtype small = ss->get(i);
+                const int s2size = small.size();
+                if (large.size() < small.size() || large.size() == 0 || small.size() == 0) {
+                    continue;
+                }
 
                 for (int offset = 1 - s2size; offset < s1size; ++offset) {
-                    const auto &s1 = ss->strings[large.first]; // these need to be within the loop because the content of strings gets modified during the iterations. Though ... with a deque i dont expect much issues.
-                    const auto &s2 = ss->strings[small.first];
-                    int l = s2.size();
+                    if (offset >= 0 && offset <= s1size - s2size) {
+                        offset = 1 + s1size - s2size; // TODO: check this, might not be enough.
+                    }
+
+//                    const auto &s1 = ss->get(large.first); // these need to be within the loop because the content of strings gets modified during the iterations. Though ... with a deque i dont expect much issues.
+//                    const auto &s2 = ss->get(small.first);
+                    int l = small.size();
                     if (offset < 0) {
                         l += offset;
                     }
-                    if (offset + s2.size() > s1.size()) {
-                        l -= (offset + (int) s2.size() - (int) s1.size());
+                    if (offset + small.size() > large.size()) {
+                        l -= (offset + (int) small.size() - (int) large.size());
+                    }
+
+                    if (((std::size_t) ((int) s1size) + ((int) s2size) - l) > max_allowed_string_size) {
+                        continue;
+                    }
+                    if (l < 1) {
+                        continue;
                     }
                     //prt2(large.first, strings.size());
                     //prt6(offset, l, s1.size(), s2.size(), toString(s1),toString(s2));
                     assert(l);
-                    const auto large_overlapbegin = s1.begin() + std::max(0, offset);
+                    const auto large_overlapbegin = large.begin() + std::max(0, offset);
                     const auto large_overlapend = large_overlapbegin + l;
-                    const auto small_overlapbegin = s2.begin() + std::max(0, -offset);
+                    const auto small_overlapbegin = small.begin() + std::max(0, -offset);
                     const auto small_overlapend = small_overlapbegin + l;
                     if (std::equal(large_overlapbegin,
                                    large_overlapend,
                                    small_overlapbegin,
                                    small_overlapend,
-                                   ss->eq)) {
-                        equality new_identity; // == a critical pair
-                        if (offset < 0) {
-                            stringtype cp1(s2.begin(), small_overlapbegin);
-                            cp1.insert(cp1.end(), ss->strings[large.second].begin(), ss->strings[large.second].end());
-                            stringtype cp2(ss->strings[small.second]);
-                            cp2.insert(cp2.end(), large_overlapend, s1.end());
-                            new_identity = std::make_pair(reduceCopyRegister(cp1), reduceCopyRegister(cp2));
-                        } else if (offset + s2.size() > s1.size()) {
+                                   ss->eq)) [[unlikely]] {
 
-                            stringtype cp1(s1.begin(), large_overlapbegin);
-                            cp1.insert(cp1.end(), ss->strings[small.second].begin(), ss->strings[small.second].end());
-                            stringtype cp2(ss->strings[large.second]);
-                            cp2.insert(cp2.end(), small_overlapend, s2.end());
+                        // equality new_identity; // == a critical pair
+                        iterateEqClassElite(i, [&](const stringid large_replacement_id) {
+                            const stringtype &large_replacement = ss->get(large_replacement_id);
+                            iterateEqClassElite(j, [&](const stringid small_replacement_id) {
+                                const stringtype &small_replacement = ss->get(small_replacement_id);
 
-                            new_identity = std::make_pair(reduceCopyRegister(cp1), reduceCopyRegister(cp2));
+                                if (offset < 0) {
+                                    stringtype cp1(small.begin(), small_overlapbegin);
+                                    cp1.insert(cp1.end(), large_replacement.begin(), large_replacement.end());
+                                    stringtype cp2(small_replacement);
+                                    cp2.insert(cp2.end(), large_overlapend, large.end());
+                                    if (addIdentity(getOrCreateString(cp1), getOrCreateString(cp2),runtimelimiter)) {
+                                        changed_something = true;
+                                    }
 
-                        } else {
-                            stringtype cp1(s1.begin(), s1.begin() + std::max(0, offset));
-                            cp1.insert(cp1.end(), ss->strings[small.second].begin(), ss->strings[small.second].end());
-                            cp1.insert(cp1.end(), s1.begin() + std::max(0, offset) + l, s1.end());
-                            new_identity.first = reduceCopyRegister(ss->strings[large.second]);
-                            new_identity.second = reduceCopyRegister(cp1);
-                        }
-                        new_identity = orderIdentity(new_identity);
-                        //std::cerr << "large rule: " << toString(strings[large.first]) << " --> " << toString(strings[large.second]) << std::endl;
-                        //std::cerr << "small rule: " << toString(strings[small.first]) << " --> " << toString(strings[small.second]) << std::endl;
-                        if (new_identity.first != new_identity.second && current_identities.find(new_identity) == current_identities.end()) {
-                            //std::cerr << "critical pair: " << toString(strings[new_identity.first]) << " == " << toString(strings[new_identity.second]) << std::endl;
-                            current_identities.insert(new_identity);
-                        }
+
+                                } else if (offset + s2size > s1size) {
+
+                                    stringtype cp1(large.begin(), large_overlapbegin);
+                                    cp1.insert(cp1.end(), small_replacement.begin(), small_replacement.end());
+                                    stringtype cp2(large_replacement);
+                                    cp2.insert(cp2.end(), small_overlapend, small.end());
+
+                                    if (addIdentity(getOrCreateString(cp1), getOrCreateString(cp2),runtimelimiter)) {
+                                        changed_something = true;
+                                    }
+
+                                } else { // is this useful ? would this replacement not have been done during expand already...?
+                                    assert(false); // try to skip this step.
+                                    stringtype cp1(large.begin(), large.begin() + std::max(0, offset));
+                                    cp1.insert(cp1.end(), small_replacement.begin(), small_replacement.end());
+                                    cp1.insert(cp1.end(), large.begin() + std::max(0, offset) + l, large.end());
+
+                                    if (addIdentity(large_replacement_id, getOrCreateString(cp1),runtimelimiter)) {
+                                        changed_something = true;
+                                    }
+                                }
+                                return true;
+
+                            });
+                            return true;
+                        });
+
 
                     }
                 }
+
+            }
+        }
+        if (changed_something) [[likely]] {
+            expand(runtimelimiter);
+        } else {
+            for (std::size_t orderindex = 0; orderindex < complexity_orderings.size(); ++orderindex) {
+                collapse(orderindex);
+            }
+            clean = true;
+        }
+        std::cerr << " EXPAND ENDED";
+    }
+
+    void print() const noexcept {};
+
+
+    std::vector<stringtype> attemptFullSimulation(const stringtype &s,
+                                                  const std::size_t order,
+                                                  RuntimeLimiter* runtimelimiter) noexcept {
+        assert(false); // TODO...
+    }
+
+    // ... todo... some orderings ... should be applied/checked AFTER the rewrite !
+    void collapse(std::size_t orderindex) { // == collapse, per order and in all possible ways
+
+        for (stringid patientid = 0; patientid < this->eqclasses.size(); ++patientid) {
+            auto &is_elite2 = is_elite[orderindex];
+            if (is_elite2[patientid]) {
+                continue; // nothing to rewrite...
+            }
+            if (!makes_sense_for_given_order[orderindex][patientid]) {
+                continue; // it is already out of the way.
+            }
+            bool original_can_be_rewritten_with_other_rules_thus_is_not_needed_anymore = false;
+            const auto &patient = ss->get(patientid);
+            actree.iterate_matches(patient.begin(), patient.end(), [&](const std::vector<stringid> &matches,
+                                                                       const typename stringtype::iterator &posbegin,
+                                                                       const typename stringtype::iterator &posend) {
+                for (const auto m : matches) {
+                    if (m != patientid && !is_elite[orderindex][m]) {
+                        // "when ignoring the rule with i as the to-be-replaced-part ... there still are other rules getting triggered ... "
+                        original_can_be_rewritten_with_other_rules_thus_is_not_needed_anymore = true;
+                        return false;
+                    }
+                }
+                return true;
+            });
+            if (original_can_be_rewritten_with_other_rules_thus_is_not_needed_anymore) {
+                makes_sense_for_given_order[orderindex][patient] = false;
             }
         }
     }
 
-    void introduceInputs() {
-        current_identities.insert(input_identities.begin(), input_identities.end());
-    }
 
-    bool cycleOnce() {
+    //TODO: put the logic for these eqclasses in utils, it keeps coming back (see mrss-linked-lists), it is useful.
+    bool addIdentity(const stringid part_index_a, const stringid part_index_b, RuntimeLimiter* runtimelimiter) noexcept {
+        //assertIdentity({part_index_a, part_index_b});
 
-        introduceInputs();
-
-        tryDelete();
-
-        tryCompose();
-        trySimplify();
-        tryOrient();
-
-        //tryCollapse();
-        //tryObsolete();
-        tryCollapseAttempt2();
-        tryDeduce();
-        {
-            Bits128 state_hash;
-            // copy all state in one contiguous slab of memory. The strings themselves dont go in there so it cant be heavy.
-            std::vector <rule> data(current_rules.begin(), current_rules.end());
-            data.insert(data.end(), current_identities.begin(), current_identities.end());
-            MurmurHash3_x64_128(data.data(), data.size() * sizeof(rule), 42, &state_hash);
-            if (hashed_states.find(state_hash) != hashed_states.end()) {
-                return false; // finished simulation, we had this state before.
+        auto prepareAdditionalStringStuff = [&](const stringid si) {
+            if (eqclasses.size() <= si) {
+                const auto &s = ss->get(si);
+                if (!s.empty()) {
+                    actree.getOrCreate(s).push_back(si);
+                }
+                while (eqclasses.size() <= si) {
+                    eqclasses.push_back(0);
+                    for (auto &ie : is_elite) {
+                        ie.push_back(true); // this thing will be its own elite...
+                    }
+                }
             }
-            hashed_states.insert(state_hash);
+        };
+        prepareAdditionalStringStuff(part_index_a);
+        prepareAdditionalStringStuff(part_index_b);
+
+        assert(part_index_a < eqclasses.size());
+        assert(part_index_b < eqclasses.size());
+        // each of these belongs to a ordered single linked list .. which loops (the lowest index points to the beginning)
+
+
+
+        // now ... combine the 2 of them!
+
+        // got to iterate the both of them once ... simultaneously .. zipping them on the go ...
+        // got to find the start first ...
+
+        std::size_t a_i = part_index_a;
+        std::size_t b_i = part_index_b;
+
+        while (eqclasses[a_i] > a_i) {
+            a_i = eqclasses[a_i];
         }
 
-        return true;
-    }
+        while (eqclasses[b_i] > b_i) {
+            b_i = eqclasses[b_i];
+        }
 
-    bool run(const int maxcycles = 1000) {
-        int n = 0;
-        while (true) {
-            if (++n > maxcycles) {
-                return false;
+        std::size_t a_begin = eqclasses[a_i];
+        std::size_t b_begin = eqclasses[b_i];
+        if (a_begin == b_begin) {
+            // they are linked already!
+            return false;
+        }
+
+        for (std::size_t order = 0; order < complexity_orderings.size(); ++order) { // update the elite, easiest done before the merge.
+            iterateEqClassElite(part_index_a,
+                                [&](const stringid elite_a) -> bool {
+                                    iterateEqClassElite(part_index_b,
+                                                        [&](const stringid elite_b) -> bool {
+                                                            if (elite_a != elite_b && complexity_orderings[order](ss->get(elite_a), ss->get(elite_b), runtimelimiter)) {
+                                                                //assert(false); // please fail
+                                                                is_elite[order][elite_b] = false;
+                                                            }
+                                                            return true;
+                                                        }, order);
+                                    return true;
+                                }, order);
+        }
+
+
+        std::size_t combined_begin;
+        std::size_t combined_i;
+        auto &eqclasses = this->eqclasses;
+        auto setReturnRef = [&combined_i, &eqclasses, &combined_begin]() {
+            while (combined_i < eqclasses[combined_i]) {
+                combined_i = eqclasses[combined_i];
             }
-            if (!cycleOnce()) {
+            eqclasses[combined_i] = combined_begin;
+        };
+
+        if (a_begin < b_begin) {
+            combined_begin = a_begin;
+            combined_i = combined_begin;
+            a_i = eqclasses[a_begin];
+            b_i = b_begin;
+            if (a_i == a_begin) {
+                eqclasses[combined_begin] = b_i;
+                setReturnRef();
+                return true;
+            }
+        } else {
+            combined_begin = b_begin;
+            combined_i = combined_begin;
+            a_i = a_begin;
+            b_i = eqclasses[b_begin];
+            if (b_i == b_begin) {
+                eqclasses[combined_begin] = a_i;
+                setReturnRef();
                 return true;
             }
         }
-        return current_identities.empty(); // if we did not manage to melt away all identities then we wont have a confluent rewriting system.
+
+
+// somehow at the end of a previous merge the other_mrss_member_partindex was not set to combined_begin
+        while (true) {
+            if (a_i < b_i) {
+                eqclasses[combined_i] = a_i;
+                combined_i = a_i;
+
+                a_i = eqclasses[a_i];
+
+                if (a_i == a_begin) {
+                    eqclasses[combined_i] = b_i;
+                    //return;
+                    break;
+                }
+            } else {
+                eqclasses[combined_i] = b_i;
+                combined_i = b_i;
+                b_i = eqclasses[b_i];
+
+                if (b_i == b_begin) {
+                    eqclasses[combined_i] = a_i;
+                    //return;
+                    break;
+                }
+            }
+        }
+        setReturnRef();
+        return true;
     }
 
+    template<typename callbackfcttype>
+    void iterateEqClass(const stringid part, const callbackfcttype &cb) const noexcept {
+        cb(part);
+        if (eqclasses[part] == part) {
+            return;
+        }
+        for (stringid i = eqclasses[part];
+             i != part;
+             i = eqclasses[i]) {
+            //prt3(i, eqclasses[i], part);
+            if (!cb(i)) {
+                return;
+            }
+        }
+    }
+
+    template<typename callbackfcttype>
+    void iterateEqClassElite(stringid part, const callbackfcttype &cb, const std::size_t order = 0) const noexcept {
+        iterateEqClass(part, [&](stringid part_) -> bool {
+            if (is_elite[order][part_]) {
+                if (!cb(part_)) {
+                    return false;
+                }
+            }
+            return true;
+        });
+    }
+
+    template<typename callbackfcttype>
+    void iterateEqClasses(const callbackfcttype &cb) const noexcept {
+        for (std::size_t i = 0; i < eqclasses.size(); ++i) {
+            // trying to keep just 1 representative per eqclass here: the tail (?).
+            if (eqclasses[i] > i) {
+                continue;
+            }
+            if (!cb(i)) {
+                return;
+            }
+        }
+    }
 
 };
 

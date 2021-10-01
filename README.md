@@ -14,7 +14,7 @@ Having a confluent rewrite system is very useful because you can use it to know 
 In other words this solves the [word problem](https://en.wikipedia.org/wiki/Word_problem_(mathematics)).
 
 
-Besides knowing whether 2 arbitrary sequences are equivalent wanted to know (in an automated way) which one is "more" than the other.  (This comes with the assumption that all symbols are positive, unable to negate eachother.)
+Besides knowing whether 2 arbitrary sequences are equivalent I also wanted to know (in an automated way) which one is "more" than the other.  (This comes with the assumption that all symbols are positive, unable to negate eachother.)
 
 > If we could rewrite strings a and b in such a way that a is a substring of (or equal to) b then we know that b is "more" than (or equal to) a.
      
